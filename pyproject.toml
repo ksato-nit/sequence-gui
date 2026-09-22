@@ -1,0 +1,27 @@
+[project]
+name = "sequence-gui"
+version = "0.1.0"
+authors = [
+    { name = "Xiaoliang Wu, Joaquin Chung, Alexander Kolar, Alexander Kiefer, Eugene Wang, Tian Zhong, Rajkumar Kettimuthu, Martin Suchara, Robert Hayek, Ansh Singal, Caitao Zhan", email = "czhan@anl.gov" }
+]
+maintainers = [
+    { name = "Caitao Zhan", email = "czhan@anl.gov" },
+    { name = "Robert Hayek", email = "rhayek@anl.gov" }
+]
+license-files = ["LICENSE"]
+description = "GUI for the SeQUeNCe quantum network simulator."
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14"
+]
+dependencies = [
+    "dash>=4.4.1",
+    "dash-bootstrap-components>=2.0.4",
+    "dash-cytoscape>=1.0.2",
+    "networkx>=3.7",
+    "numpy>=2.5.3",
+    "pandas>=3.0.6",
+    "sequence>=1.2.0",
+]

@@ -6,6 +6,8 @@ such as unit dropdowns
 
 import os
 import base64
+import json
+from pathlib import Path
 from dash import dcc
 from dash import html
 import dash_bootstrap_components as dbc
@@ -702,7 +704,7 @@ def makeLegend(values):
                         html.Span(
                             className='dot',
                             style={
-                                'background-color': TYPE_COLORS[x],
+                            'background-color': TYPE_COLORS.get(x, '#97C2FC'),
                                 'height': '25px',
                                 'width': '25px',
                                 'border-radius': '50%',
@@ -777,77 +779,28 @@ results_menu = dbc.Form(
 
 simulation_menu = html.Div(
     [
-        html.H3('Run (WIP)'),
-        dbc.Row(
-            [
-                dbc.Col(
-                    dbc.Label('Name'),
-                    width=2
-                ),
-                dbc.Col(dbc.Input(
-                    id='sim_name',
-                    placeholder='Ex: Test_1'
-                ), width=10)
-            ],
-            className="g-0"
-        ),
-        dbc.Row(
-            [
-                dbc.Col(
-                    dbc.Label('Time'),
-                    width=2
-                ),
-                dbc.Col(dbc.Input(
-                    id='sim_time_in',
-                    placeholder='Enter simulation time'
-                ), width=8),
-                dbc.Col(
-                    getTimeUnits('sim'),
-                    width=2,
-                ),
-            ],
-            className="g-0"
-        ),
-        dbc.Row(
-            [
-                dbc.Label("Logging Options", width=6),
-                dbc.Col(
-                    dbc.RadioItems(
-                        id='logging_verbosity',
-                        options=[
-                            {"label": 'Critical', 'value': 'CRITICAL'},
-                            {"label": 'Error', 'value': 'ERROR'},
-                            {"label": 'Warning', 'value': 'WARNING'},
-                            {"label": 'Info', 'value': 'INFO'},
-                            {"label": 'Debug', 'value': 'DEBUG'},
-                            {'label': 'None', 'value': 'NOTSET'},
-                        ],
-                        value='NOTSET',
-                        inline=True
-                    ),
-                    width=12,
-                ),
-            ],
-        ),
-        html.Div(
-            [
-                dbc.Button('Run', color='primary', id='run_sim'),
-            ],
-            className="d-grid"
-        ),
-        
-        dcc.Interval(
-            id='running',
-            interval=1000,
-            n_intervals=0,
-            disabled=True
-        ),
-        html.Pre(id='runtime'),
-        html.Pre(id='simtime'),
-        results_menu
+        html.H3('Run'),
+        dcc.Upload(dbc.Button('Load topology JSON', size='sm'), id='load_topology', accept='.json'),
+        html.Div(id='load_status'),
+        dbc.Label('Experiment parameters (JSON)', html_for='sim_parameters'),
+        dcc.Upload(dbc.Button('Load parameters JSON', size='sm'), id='load_parameters', accept='.json'),
+        dcc.Textarea(id='sim_parameters', style={'width': '100%', 'height': '250px'},
+                     value=json.dumps({'stop_time_s': 5, 'seed': 0, 'requests': [dict(source='NU', target='StarLight',
+                         submit=0, start=1, end=4, memories=1, fidelity=0.8)]}, indent=2)),
+        html.Details([
+            html.Summary('Experiment Python (editable)'),
+            html.P('Standalone Python: sys.argv[1] is the saved topology JSON; sys.argv[2] is the parameters JSON. '
+                   'The script builds and runs the simulation. stdout/stderr appear below. Runs locally with your account privileges.'),
+            dcc.Upload(dbc.Button('Load Python file', size='sm'), id='load_code', accept='.py'),
+            dcc.Textarea(id='sim_code', style={'width': '100%', 'height': '300px'},
+                         value=Path(__file__).with_name('request_experiment.py').read_text(encoding='utf-8')),
+        ]),
+        dbc.Button('Run', color='primary', id='run_sim', className='w-100'),
+        html.Pre(id='runtime', style={'whiteSpace': 'pre-wrap', 'overflowWrap': 'anywhere'}),
+        results_menu,
     ],
     id=tab_ids[8],
-    style=MENU_STYLE
+    style=MENU_STYLE,
 )
 
 navbar = dbc.Navbar(

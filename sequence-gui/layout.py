@@ -31,7 +31,7 @@ def make_item(menu, label, num, icon):
 
 
 def getSidebar(graph, delays, tdm):
-    return html.Div(
+    sidebar = html.Div(
         [
             html.Div(
                 [
@@ -136,6 +136,11 @@ def getSidebar(graph, delays, tdm):
         id="sidebar_select",
         style=SIDEBAR_SELECT_STYLE,
     )
+    # Keep every panel mounted: editing callbacks use controls across tabs.
+    for tab in sidebar.children[1].children:
+        sidebar.children.append(tab.children)
+        tab.children = None
+    return sidebar
 
 
 def graph_element(graph, name):

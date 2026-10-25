@@ -2,12 +2,15 @@
 A Class which contains all the logic and data for the GUI.
 """
 
-import datetime
+import base64
 import json
 import shutil
-import threading
+import subprocess
+import sys
+import tempfile
 import time
 from collections import OrderedDict
+from pathlib import Path
 
 import dash
 import networkx as nx
@@ -15,15 +18,13 @@ import numpy as np
 import pandas as pd
 from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
-from sequence.topology.router_net_topo import RouterNetTopo
-from sequence.topology.topology import Topology
 
 from .css_styles import *
 from .graph_comp import GraphNode
 from .layout import TYPE_COLORS, TYPES
 from .layout import get_app_layout
 from .menus import *
-from .simulator_bindings import GUI_Sim
+from .topology import load_graph_data, graph_to_topology
 
 EDGE_DICT_ORDER = OrderedDict(
     {
@@ -120,8 +121,6 @@ class QuantumGUI:
                         indent=4
                     )
 
-        # TODO: re-add simulation
-        # self.simulation = GUI_Sim(0, 0, 'NOTSET', 'init', self)
         self.sim_params = None
 
         # nodes = list(self.data.edges.data())
@@ -264,7 +263,7 @@ class QuantumGUI:
         node_colors = {}
         edge_colors = {}
         for node in nodes:
-            node_colors[node[0]] = TYPE_COLORS[node[1]['node_type']]
+            node_colors[node[0]] = TYPE_COLORS.get(node[1]['node_type'], '#97C2FC')
             # node_images[node[0]] = getNodeImage(node[1]['node_type'])
         for edge in edges:
             color = TYPE_COLORS[edge[2]['data']['link_type']]
@@ -276,88 +275,11 @@ class QuantumGUI:
         return colored_graph
 
     def graph_to_topology(self):
-        """Function which serializes the class's current data field to a dictionary for export or other use."""
+        return graph_to_topology(self.data, self.cc_delays, self.templates)
 
-        graph = self.data.copy()
-        nodes = list(graph.nodes.data())
-        edges = list(graph.edges.data())
-        # q_delay = self.qc_tdm.copy()
-        c_delay = self.cc_delays.copy()
-
-        # add node dict
-        nodes_top = []
-        for node in nodes:
-            node_type = node[1]['node_type']
-            node_template_name = node[1]['data']['template']
-            node_template = self.templates[node_type][node_template_name]
-
-            node_dict = {
-                Topology.NAME: node[1]['label'],
-                Topology.TYPE: node_type,
-                Topology.SEED: None,
-                Topology.TEMPLATE: node_template_name
-            }
-            if node_type == RouterNetTopo.QUANTUM_ROUTER:
-                node_dict[RouterNetTopo.MEMO_ARRAY_SIZE] = node_template['memo_size']
-
-            nodes_top.append(node_dict)
-
-        # add quantum connections dict
-        qconnections = []
-        for edge in edges:
-            qconnections.append(
-                {
-                    Topology.CONNECT_NODE_1: edge[2]['data']['source'],
-                    Topology.CONNECT_NODE_2: edge[2]['data']['target'],
-                    Topology.ATTENUATION: float(edge[2]['data']['attenuation']),
-                    Topology.DISTANCE: int(edge[2]['data']['distance']),
-                    Topology.TYPE: RouterNetTopo.MEET_IN_THE_MID
-                }
-            )
-
-        # add classical connections dict
-        cchannels = []
-        table = c_delay.to_numpy()
-        labels = list(c_delay.columns)
-        for i, src in enumerate(labels):
-            for j, dst in enumerate(labels):
-                if i == j:
-                    continue
-                delay = table[i][j] / 2  # divide round trip time by 2
-                cchannels.append(
-                    {
-                        Topology.SRC: src,
-                        Topology.DST: dst,
-                        Topology.DELAY: int(delay)
-                    }
-                )
-
-        # add templates dict
-        templates = {}
-        for temp_name, temp_vals in self.templates['QuantumRouter'].items():
-            templates[temp_name] = {
-                'MemoryArray': self.templates['Memory'][temp_vals['mem_type']]
-            }
-        for temp_name, temp_vals in self.templates['BSMNode'].items():
-            templates[temp_name] = {
-                'SingleAtomBSM': {
-                    'detectors': [
-                        self.templates['Detector'][temp_vals['detector_1']],
-                        self.templates['Detector'][temp_vals['detector_2']]
-                    ]
-                }
-            }
-
-        # collect and finalize
-        output = {
-            Topology.ALL_NODE: nodes_top,
-            Topology.ALL_Q_CONNECT: qconnections,
-            Topology.ALL_C_CHANNEL: cchannels,
-            Topology.ALL_TEMPLATES: templates,
-            Topology.STOP_TIME: int(1e12)
-        }
-
-        return output
+    def node_templates(self, kind):
+        return list(dict.fromkeys([*self.templates.get(kind, {}),
+            *[node['data']['template'] for _, node in self.data.nodes(data=True) if node['node_type'] == kind]]))
 
     def _callback_add_node(self, add_node_name, add_node_type, add_node_template):
         """Function which adds a node with the given name and type to the current graph.
@@ -562,22 +484,12 @@ class QuantumGUI:
             os.remove(DIRECTORY+'/topology.json')
         return
 
-    def save_all(self, path):
-        """Function which saves all parts of the gui to a file (Topology, Templates, and Simulations).
-
-        Args:
-            path (str):
-                file path to where output should be saved
-        """
-
-        new_path = path + '/data'
-        if not os.path.exists(DIRECTORY+'/data'):
-            os.mkdir(DIRECTORY+'/data')
-
-        # self.save_templates(new_path)
-        self.save_simulation(new_path)
-        self.save_topology(new_path)
-        return new_path
+    def save_all(self, path, code):
+        topology = self.save_topology(str(path))
+        parameters = self.save_simulation(str(path))
+        script = Path(path) / 'experiment.py'
+        script.write_text(code, encoding='utf-8')
+        return str(script), topology, parameters
 
     def save_topology(self, path):
         """Function which saves the topology of the GUI.
@@ -587,7 +499,7 @@ class QuantumGUI:
                 file path to where output should be saved
         """
 
-        with open(path+'/topology.json', 'w') as outfile:
+        with open(path+'/topology.json', 'w', encoding='utf-8') as outfile:
             json.dump(
                 self.graph_to_topology(),
                 outfile,
@@ -605,7 +517,7 @@ class QuantumGUI:
                 file path to where output should be saved
         """
 
-        with open(path+'/simulation.json', 'w') as outfile:
+        with open(path+'/simulation.json', 'w', encoding='utf-8') as outfile:
             json.dump(
                 self.sim_params,
                 outfile,
@@ -838,7 +750,15 @@ class QuantumGUI:
                         src = last_clicked['source']
                         trgt = last_clicked['target']
                         new_data = {k: edited[k] for k in EDGE_DICT_ORDER}
-                        self.data.edges[src, trgt]['data'] = new_data
+                        new_src, new_dst = new_data['source'], new_data['target']
+                        if (new_src not in self.data or new_dst not in self.data or new_src == new_dst
+                                or ((src, trgt) != (new_src, new_dst) and self.data.has_edge(new_src, new_dst))):
+                            return [dash.no_update, '', 'Invalid or duplicate link endpoints.', *self._callback_get_output()]
+                        attrs = dict(self.data.edges[src, trgt], data=new_data)
+                        graph = self.data.copy()
+                        graph.remove_edge(src, trgt)
+                        graph.add_edge(new_src, new_dst, **attrs)
+                        self.data = graph
                         gd = nx.readwrite.cytoscape_data(self.data)['elements']
                         err_msg = ''
 
@@ -858,12 +778,19 @@ class QuantumGUI:
                     # for a node
                     else:
                         old_name = last_clicked['name']
+                        if not edited['name'] or (edited['name'] != old_name and edited['name'] in self.data):
+                            return [dash.no_update, 'Node name must be nonempty and unique.', '', *self._callback_get_output()]
                         self.data.nodes[old_name]['data'] = edited
                         self.data.nodes[old_name]['node_type'] = edited['type']
-                        self.data = nx.relabel_nodes(
+                        self.data.nodes[old_name]['label'] = edited['name']
+                        graph = nx.relabel_nodes(
                             self.data,
                             {old_name: edited['name']}
                         )
+                        self.cc_delays.rename(columns={old_name: edited['name']}, inplace=True)
+                        for source, target, attrs in graph.edges(data=True):
+                            attrs['data'].update(source=source, target=target)
+                        self.data = graph
                         gd = nx.readwrite.cytoscape_data(self.data)['elements']
                         err_msg = ''
 
@@ -923,7 +850,7 @@ class QuantumGUI:
                 elif input_id == 'delay_table':
                     df = pd.DataFrame(update_delay)
                     df.drop('To', axis=1, inplace=True)
-                    self.cc_delays = df.astype(int)
+                    self.cc_delays = df.astype(float)
 
                     nodes, legend, new_delay_data, delay_columns = \
                         self._callback_get_output()
@@ -941,20 +868,13 @@ class QuantumGUI:
         @app.callback(
             Output('graph_table', 'data'),
             Output('graph_table', 'columns'),
-            Input('toggle_nodes', 'n_clicks'),
-            Input('toggle_edges', 'n_clicks')
+            Input('toggle_nodes', 'n_clicks_timestamp'),
+            Input('toggle_edges', 'n_clicks_timestamp'),
+            Input('graph', 'elements'),
         )
-        def show_nodes(toggleN, toggleE):
-            ctx = dash.callback_context
-            if not ctx.triggered:
-                return [self.edge_table, self.edge_columns]
-            else:
-                input_id = ctx.triggered[0]['prop_id'].split('.')[0]
-                # print(input_id)
-                if input_id == 'toggle_nodes':
-                    return [self.node_table, self.node_columns]
-                elif input_id == 'toggle_edges':
-                    return [self.edge_table, self.edge_columns]
+        def show_nodes(toggleN, toggleE, elements):
+            return ([self.node_table, self.node_columns] if (toggleN or 0) >= (toggleE or 0)
+                    else [self.edge_table, self.edge_columns])
 
         # EDIT #
         @app.callback(
@@ -974,7 +894,7 @@ class QuantumGUI:
             elif input_id == 'tapNodeData':
                 out = getSelectedNodeMenu(
                     tapped_node['data'],
-                    self.templates[tapped_node['data']['type']]
+                    self.node_templates(tapped_node['data']['type'])
                 )
                 val = tapped_node['data'].copy()
                 return [out, None, None, val]
@@ -1045,76 +965,55 @@ class QuantumGUI:
                 return [router_template, '', opts, '']
 
         @app.callback(
-            Output('running', 'disabled'),
-            Output('runtime', 'children'),
-            Output('simtime', 'children'),
-            Output('results_out', 'children'),
-
-            Input('run_sim', 'n_clicks'),
-            Input('running', 'n_intervals'),
-
-            State('runtime', 'children'),
-            State('time_units_sim', 'value'),
-            State('sim_time_in', 'value'),
-            State('logging_verbosity', 'value'),
-            State('sim_name', 'value')
+            Output('refresh', 'n_clicks'), Output('load_status', 'children'),
+            Output('sim_code', 'value'), Output('sim_parameters', 'value'),
+            Input('load_topology', 'contents'), Input('load_code', 'contents'),
+            Input('load_parameters', 'contents'), State('refresh', 'n_clicks'),
+            prevent_initial_call=True,
         )
-        def run_sim(clicks, n, runtime, units, time_to_run, logging, sim_name):
-            ctx = dash.callback_context
-            input_id = ctx.triggered[0]['prop_id'].split('.')[0]
-
-            if input_id == 'run_sim':
-                if time_to_run is None or units is None or sim_name is None:
-                    return [dash.no_update, '', '', '']
+        def load_file(topology, code, parameters, clicks):
+            outputs = [dash.no_update] * 4
+            try:
+                kind = dash.ctx.triggered_id
+                contents = dict(load_topology=topology, load_code=code, load_parameters=parameters)[kind]
+                contents = base64.b64decode(contents.split(',', 1)[1]).decode('utf-8-sig')
+                if kind == 'load_topology':
+                    graph, delays, tdm = load_graph_data(json.loads(contents))
+                    self.data, self.cc_delays, self.qc_tdm = graph, delays, tdm
+                    outputs[0] = (clicks or 0) + 1
+                    outputs[1] = f'Loaded {len(graph)} nodes, {graph.number_of_edges()} links.'
                 else:
-                    if not self.simulation.timeline.is_running:
-                        self.simulation = GUI_Sim(
-                            int(time_to_run),
-                            int(units),
-                            logging,
-                            sim_name,
-                            self
-                        )
-                        self.simulation.init_logging()
-                        self.simulation.random_request_simulation()
-                        func = self.simulation.timeline.run
-                        toRun = threading.Thread(
-                            target=func,
-                            name="run_simulation"
-                        )
-                        toRun.start()
-                        print('start')
-                        return [False, '00:00:00', '', '']
-                    else:
-                        self.simulation.timeline.stop()
-                        print('stop')
-                        return [True, '', '', '']
-            elif input_id == 'running':
-                if self.simulation.timeline.is_running:
-                    h, m, s = runtime.split(':')
-                    current_time = int(
-                        datetime.timedelta(
-                            hours=int(h),
-                            minutes=int(m),
-                            seconds=int(s)
-                        ).total_seconds()
-                    )
-                    current_time += 1
-                    str_time = time.gmtime(current_time)
-                    new_runtime = time.strftime('%H:%M:%S', str_time)
-                    new_simtime = self.simulation.getSimTime()
+                    if kind == 'load_parameters':
+                        json.loads(contents)
+                    outputs[2 if kind == 'load_code' else 3] = contents
+                    outputs[1] = 'Loaded Python code.' if kind == 'load_code' else 'Loaded parameters.'
+            except Exception as exc:
+                outputs[1] = f'Load failed: {exc}'
+            return outputs
 
-                    return [dash.no_update, new_runtime, new_simtime, '']
-                else:
-                    self.simulation.write_to_file()
-                    sim_results = self.simulation.sim_name + '_results.txt'
-
-                    with open(DIRECTORY + '/'+sim_results) as outfile:
-                        sim_results = outfile.read()
-                    outfile.close()
-                    return [True, dash.no_update, dash.no_update, sim_results]
-            else:
-                return [True, '', '', '']
+        @app.callback(
+            Output('runtime', 'children'), Output('results_out', 'children'),
+            Input('run_sim', 'n_clicks'),
+            State('sim_parameters', 'value'), State('sim_code', 'value'),
+            prevent_initial_call=True,
+            running=[(Output('run_sim', 'disabled'), True, False)],
+        )
+        def run_sim(clicks, parameters, code):
+            try:
+                self.sim_params = json.loads(parameters)
+                root = Path(DIRECTORY) / 'runs'
+                root.mkdir(exist_ok=True)
+                folder = Path(tempfile.mkdtemp(prefix='run-', dir=root))
+                files = self.save_all(folder, code)
+                started = time.perf_counter()
+                result = subprocess.run([sys.executable, '-X', 'utf8', *files],
+                    cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                (folder / 'output.txt').write_text(result.stdout, encoding='utf-8')
+                return (f'Wall time: {time.perf_counter() - started:.3f} s\nFiles: {folder}',
+                        f'Exit code: {result.returncode}\n{result.stdout}')
+            except Exception as exc:
+                return '', f'Run failed: {type(exc).__name__}: {exc}'
 
         @app.callback(
             Output("download", "data"),
@@ -1122,22 +1021,20 @@ class QuantumGUI:
             Input('export_topo', 'n_clicks'),
             Input('export_templ', 'n_clicks'),
             Input('export_sim', 'n_clicks'),
+            State('sim_parameters', 'value'), State('sim_code', 'value'),
             prevent_initial_call=True,
         )
-        def export_data(all, top, temp, sim):
+        def export_data(all, top, temp, sim, parameters, code):
             ctx = dash.callback_context
             input_id = ctx.triggered[0]['prop_id'].split('.')[0]
             self.clean_directory()
 
+            if input_id in ('export_all', 'export_sim'):
+                self.sim_params = json.loads(parameters)
             if input_id == 'export_all':
-                path = self.save_all(DIRECTORY)
-
-                shutil.make_archive(
-                    base_name=DIRECTORY+'/sequence_data',
-                    format='zip',
-                    root_dir=path,
-                )
-                shutil.rmtree(path)
+                with tempfile.TemporaryDirectory(dir=DIRECTORY) as folder:
+                    self.save_all(folder, code)
+                    shutil.make_archive(DIRECTORY + '/sequence_data', 'zip', root_dir=folder)
                 return dcc.send_file(DIRECTORY + '/sequence_data.zip')
             elif input_id == 'export_topo':
                 return dcc.send_file(self.save_topology(DIRECTORY))
@@ -1154,33 +1051,18 @@ class QuantumGUI:
             Output('refresh', 'style'),
             
             Input("btn_sidebar", "n_clicks"),
+            Input('tabs', 'value'),
 
             State('side_click', 'data')
         )
-        def toggle_sidebar(n, nclick):
-            ctx = dash.callback_context
-            input_id = ctx.triggered[0]['prop_id'].split('.')[0]
-            if input_id == 'btn_sidebar':
-                if nclick == "SHOW":
-                    styles = [MENU_STYLE for i in range(len(tab_ids))]
-                    styles.append('HIDDEN')
-                    styles.append(GRAPH_DIV_STYLE)
-                    styles.append(PROJECT)
-                    styles.append(REFRESH)
-                else:
-                    styles = [MENU_STYLE_H for i in range(len(tab_ids))]
-                    styles.append('SHOW')
-                    styles.append(GRAPH_DIV_STYLE_H)
-                    styles.append(PROJECT_H)
-                    styles.append(REFRESH_H)
-            else:
-                styles = [MENU_STYLE for i in range(len(tab_ids))]
-                styles.append('HIDDEN')
-                styles.append(GRAPH_DIV_STYLE)
-                styles.append(PROJECT)
-                styles.append(REFRESH)
-
-            return styles
+        def toggle_sidebar(n, selected, nclick):
+            visible = nclick != 'SHOW'
+            if dash.ctx.triggered_id == 'btn_sidebar':
+                visible = not visible
+            return ([MENU_STYLE if visible and str(i + 1) == selected else {'display': 'none'}
+                     for i in range(len(tab_ids))] +
+                    (['HIDDEN', GRAPH_DIV_STYLE, PROJECT, REFRESH] if visible else
+                     ['SHOW', GRAPH_DIV_STYLE_H, PROJECT_H, REFRESH_H]))
 
         @app.callback(
             Output("from_node", "options"),
@@ -1196,7 +1078,7 @@ class QuantumGUI:
             Input('selected_node_type', 'value'),
         )
         def updateNodeTypeMenu(type_in):
-            templates = list(self.templates[type_in].keys())
+            templates = self.node_templates(type_in)
             return makeDropdownOptions(templates)
 
         @app.callback(
@@ -1205,7 +1087,7 @@ class QuantumGUI:
             Input('type_menu', 'value'),
         )
         def updateNodeTempMenu(type_in):
-            templates = list(self.templates[type_in].keys())
+            templates = self.node_templates(type_in)
             return [makeDropdownOptions(templates), templates[0]]
 
         @app.callback(
